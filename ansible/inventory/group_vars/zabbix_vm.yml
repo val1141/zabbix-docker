@@ -1,0 +1,70 @@
+---
+# VM baseline.
+zabbix_timezone: Asia/Almaty
+zabbix_install_qemu_guest_agent: false
+zabbix_install_unattended_upgrades: true
+
+# Compose deployment layout from the repository .env.
+zabbix_data_directory: /srv/zabbix
+zabbix_compose_project_path: /opt/zabbix
+zabbix_compose_project_owner: root
+zabbix_compose_project_group: root
+
+# Optional project sync from the Ansible controller.
+# Keep disabled when the repository is cloned/deployed by another pipeline.
+zabbix_compose_copy_from_controller: true
+zabbix_compose_local_project_path: "{{ playbook_dir }}/../.."
+zabbix_compose_sync_delete: false
+
+# Optional stack management. Preparation is the default; compose startup is opt-in.
+zabbix_compose_run_init: true
+zabbix_compose_up: true
+zabbix_compose_pull: missing
+zabbix_compose_wait: true
+zabbix_compose_wait_timeout: 180
+
+# Docker installation is delegated to geerlingguy.docker.
+# Adding users to the docker group is root-equivalent; keep the list explicit.
+zabbix_docker_users: []
+zabbix_docker_daemon_options:
+  log-driver: json-file
+  log-opts:
+    max-size: 100m
+    max-file: "5"
+  live-restore: true
+
+# Host firewall.
+zabbix_manage_ufw: true
+zabbix_ufw_logging: low
+zabbix_ssh_port: 22
+zabbix_ssh_allowed_sources:
+  - any
+
+# Zabbix trapper port used by active agents and proxies.
+zabbix_trapper_port: 10051
+zabbix_trapper_allowed_sources:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+# Web UI is bound to 127.0.0.1 by compose. Fill this only if you add a host-level reverse proxy.
+zabbix_web_allowed_sources: []
+zabbix_web_ports:
+  - 80
+  - 443
+
+# Docker published ports can bypass plain UFW filtering. This service installs a small
+# DOCKER-USER chain rule set to restrict the published 10051/tcp port by source CIDR.
+zabbix_manage_docker_user_firewall: true
+zabbix_docker_user_firewall_log_drops: false
+
+# Periodic logical backup of PostgreSQL through scripts/backup-zabbix-db.sh.
+zabbix_backup_timer_enabled: true
+zabbix_backup_on_calendar: "*-*-* 03:15:00"
+zabbix_backup_randomized_delay: 20min
+
+# Small VM tuning.
+zabbix_manage_sysctl: true
+zabbix_sysctl_settings:
+  vm.swappiness: "10"
+  fs.inotify.max_user_watches: "1048576"

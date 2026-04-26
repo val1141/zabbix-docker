@@ -1,280 +1,104 @@
-# =========================
-# Zabbix images build + run helper (bake v3-phase)
-# =========================
-.DEFAULT_GOAL := up
+.DEFAULT_GOAL := help
 
-COMPOSE_PROFILES ?=
-
-# -------- User-facing knobs (override via CLI) --------
-OS ?= alpine
-DB ?= mysql
-ZBX_VERSION ?= 7.4
-
-# Remote defaults (Official image registry)
-REMOTE_IMAGE_PREFIX ?= zabbix/
-REMOTE_ZBX_TAG ?= $(OS)-$(ZBX_VERSION)-latest
-
-# Local defaults (what bake builds)
-LOCAL_IMAGE_PREFIX ?=
-LOCAL_ZBX_TAG ?= $(OS)-$(ZBX_VERSION)-local
-
-# Optional multi-arch platforms: "linux/amd64,linux/arm64"
-PLATFORMS ?=
-
-# ---- Base images per OS ----
-ALPINE_BASE_IMAGE ?= alpine:3.23
-CENTOS_BASE_IMAGE ?= quay.io/centos/centos:stream10-minimal
-OL_BASE_IMAGE ?= container-registry.oracle.com/os/oraclelinux:10-slim
-UBUNTU_BASE_IMAGE ?= ubuntu:resolute
-RHEL_BASE_IMAGE ?= registry.access.redhat.com/ubi10/ubi-minimal:10.1
-
-# Auto-select base image by OS (unless explicitly overridden)
-ifeq ($(origin OS_BASE_IMAGE), undefined)
-  ifeq ($(OS),alpine)
-        OS_BASE_IMAGE := $(ALPINE_BASE_IMAGE)
-  else ifeq ($(OS),centos)
-        OS_BASE_IMAGE := $(CENTOS_BASE_IMAGE)
-  else ifeq ($(OS),ol)
-        OS_BASE_IMAGE := $(OL_BASE_IMAGE)
-  else ifeq ($(OS),ubuntu)
-        OS_BASE_IMAGE := $(UBUNTU_BASE_IMAGE)
-  else ifeq ($(OS),rhel)
-        OS_BASE_IMAGE := $(RHEL_BASE_IMAGE)
-  else
-        $(error Unsupported OS: $(OS))
-  endif
-endif
-
-# Compose
 COMPOSE ?= docker compose
+COMPOSE_FILE ?= compose.yaml
 ENV_FILE ?= .env
+SERVICES ?= zabbix-server zabbix-web-nginx-pgsql postgres-server
+ARGS ?=
+ANSIBLE_INVENTORY ?= ansible/inventory/hosts.ini
+ANSIBLE_PLAYBOOK ?= ansible/playbooks/prepare-vm.yml
+ANSIBLE_ARGS ?=
 
-# -------- Bake group names (as in docker-bake.hcl) --------
-BAKE_BASE_GROUP              := base
-BAKE_BUILDERS_MYSQL_GROUP    := builder-mysql
-BAKE_BUILDERS_PGSQL_GROUP    := builder-pgsql
-BAKE_BUILDERS_SQLITE3_GROUP  := builder-sqlite3
+compose = $(COMPOSE) -f $(COMPOSE_FILE) --env-file $(ENV_FILE)
 
-BAKE_RUNTIME_MYSQL_ALL       := runtime-mysql-all
-BAKE_RUNTIME_MYSQL_MINIMAL   := runtime-mysql-minimal
-BAKE_RUNTIME_PGSQL_ALL       := runtime-pgsql-all
-BAKE_RUNTIME_PGSQL_MINIMAL   := runtime-pgsql-minimal
-
-# Export for sub-make / shells
-export OS DB MAJOR_VERSION ZBX_VERSION OS_BASE_IMAGE PLATFORMS
-export LOCAL_IMAGE_PREFIX LOCAL_ZBX_TAG REMOTE_IMAGE_PREFIX REMOTE_ZBX_TAG
-export COMPOSE_PROFILES
-
-# Pick compose file based on DB
-ifeq ($(DB),mysql)
-  COMPOSE_FILE := compose.yaml
-else ifeq ($(DB),pgsql)
-  COMPOSE_FILE := compose_pgsql.yaml
-else
-  COMPOSE_FILE := compose.yaml
-endif
-
-# Compose env passthrough: ensure compose sees the same variables
-# (useful if compose uses ${OS}/${DB}/${IMAGE_TAG}/${IMAGE_PREFIX})
-define compose_env
-OS="$(OS)" DB="$(DB)" ZBX_IMAGE_TAG="$(1)" ZBX_IMAGE_REGISTRY="$(2)" ZBX_IMAGE_NAMESPACE="" $(COMPOSE) -f "$(COMPOSE_FILE)" --env-file "$(ENV_FILE)"
-endef
-
-# Bake env passthrough (match docker-bake.hcl variable names!)
-define bake_env
-OS="$(OS)" \
-ZBX_VERSION="$(ZBX_VERSION)" \
-OS_BASE_IMAGE="$(OS_BASE_IMAGE)" \
-ZBX_IMAGE_TAG="$(LOCAL_ZBX_TAG)" \
-PLATFORMS="$(PLATFORMS)" \
-ZBX_IMAGE_NAMESPACE="$(LOCAL_IMAGE_PREFIX)" \
-docker buildx bake
-endef
-
-# Choose runtime groups by DB
-ifeq ($(DB),mysql)
-  BAKE_RUNTIME_ALL_GROUP     := $(BAKE_RUNTIME_MYSQL_ALL)
-  BAKE_RUNTIME_MINIMAL_GROUP := $(BAKE_RUNTIME_MYSQL_MINIMAL)
-  BAKE_BUILDERS_GROUP        := $(BAKE_BUILDERS_MYSQL_GROUP)
-else ifeq ($(DB),pgsql)
-  BAKE_RUNTIME_ALL_GROUP     := $(BAKE_RUNTIME_PGSQL_ALL)
-  BAKE_RUNTIME_MINIMAL_GROUP := $(BAKE_RUNTIME_PGSQL_MINIMAL)
-  BAKE_BUILDERS_GROUP        := $(BAKE_BUILDERS_PGSQL_GROUP)
-else ifeq ($(DB),sqlite3)
-  # No sqlite3 runtime groups listed in your target table; keep builders only.
-  BAKE_BUILDERS_GROUP        := $(BAKE_BUILDERS_SQLITE3_GROUP)
-  BAKE_RUNTIME_ALL_GROUP     :=
-  BAKE_RUNTIME_MINIMAL_GROUP :=
-endif
-
-# ---- Guards ----
-check-rhel-host:
-	@if [ "$(OS)" = "rhel" ]; then \
-	  if [ -r /etc/os-release ]; then \
-	    . /etc/os-release; HOST_ID="$$ID"; \
-	  else \
-	    HOST_ID="$$(uname -s | tr A-Z a-z)"; \
-	  fi; \
-	  if [ "$$HOST_ID" != "rhel" ]; then \
-	    echo "ERROR: Refusing to build Red Hat images on host '$$HOST_ID'."; \
-	    echo "This build requires RHEL subscription repositories. Run the build on a Red Hat host."; \
-	    exit 1; \
-	  fi; \
-	fi
-
-# -------- Targets --------
-.PHONY: help print-vars \
-	base builders-mysql builders-pgsql builders-sqlite3 builders \
-	runtime-mysql-all runtime-mysql-minimal runtime-pgsql-all runtime-pgsql-minimal \
-	runtime-all runtime-minimal runtime \
-	build build-all \
-	up up-local down restart logs ps \
-	bake-target clean
+.PHONY: help init config pull up down stop restart ps logs logs-follow update backup restore psql shell clean destroy ansible-deps ansible-prepare
 
 help:
+	@echo "Zabbix production deployment helper"
+	@echo ""
 	@echo "Usage:"
-	@echo "  make base                       # build build-base"
-	@echo "  make builders                    # build builders for DB=$(DB) (mysql/pgsql/sqlite3)"
-	@echo "  make runtime-minimal             # build runtime-<db>-minimal (mysql/pgsql only)"
-	@echo "  make runtime-all                 # build runtime-<db>-all (mysql/pgsql only)"
-	@echo "  make build                       # base + builders + runtime-minimal (mysql/pgsql only)"
-	@echo "  make build-all                   # base + builders + runtime-all (mysql/pgsql only)"
-	@echo "  make bake-target TARGET=server-mysql   # build a single bake target by name"
+	@echo "  make init                         prepare /srv/zabbix and local secrets"
+	@echo "  make config                       render and validate docker compose config"
+	@echo "  make pull                         pull official images"
+	@echo "  make up                           init + start stack"
+	@echo "  make down                         stop and remove containers/networks"
+	@echo "  make stop                         stop containers"
+	@echo "  make restart                      restart stack"
+	@echo "  make ps                           show container status"
+	@echo "  make logs                         show logs for core services"
+	@echo "  make logs-follow                  follow logs for core services"
+	@echo "  make update                       init + pull + up"
+	@echo "  make backup                       create PostgreSQL dump and config archive"
+	@echo "  make restore FILE=/path/file.dump restore DB dump; requires CONFIRM_RESTORE=yes"
+	@echo "  make psql                         open psql inside postgres container"
+	@echo "  make destroy CONFIRM_DESTROY=yes  destructive: down -v"
+	@echo "  make ansible-deps                 install Ansible Galaxy dependencies"
+	@echo "  make ansible-prepare              prepare VM with ansible/playbooks/prepare-vm.yml"
 	@echo ""
-	@echo "Compose:"
-	@echo "  make up                          # pull+up using REMOTE_* images"
-	@echo "  make up-local                    # build (minimal) then up using LOCAL_* images"
-	@echo ""
-	@echo "Common overrides:"
-	@echo "  make build DB=mysql"
-	@echo "  make build DB=pgsql"
-	@echo "  make builders DB=sqlite3"
-	@echo "  make build OS=ubuntu OS_BASE_IMAGE=ubuntu:resolute"
-	@echo "  make build PLATFORMS=linux/amd64,linux/arm64"
-	@echo "  make build LOCAL_IMAGE_PREFIX=ghcr.io/zabbix/"
-	@echo ""
-	@echo "Current config:"
-	@$(MAKE) --no-print-directory print-vars
+	@echo "Overrides:"
+	@echo "  COMPOSE='docker compose' COMPOSE_FILE=compose.yaml ENV_FILE=.env ARGS='...'"
 
-print-vars:
-	@echo "OS=$(OS)"
-	@echo "OS_BASE_IMAGE=$(OS_BASE_IMAGE)"
-	@echo "DB=$(DB)"
-	@echo "MAJOR_VERSION=$(MAJOR_VERSION)"
-	@echo "ZBX_VERSION=$(ZBX_VERSION)"
-	@echo "LOCAL_ZBX_TAG=$(LOCAL_ZBX_TAG)"
-	@echo "LOCAL_IMAGE_PREFIX=$(LOCAL_IMAGE_PREFIX)"
-	@echo "PLATFORMS=$(PLATFORMS)"
-	@echo "ENV_FILE=$(ENV_FILE)"
-	@echo "COMPOSE_FILE=$(COMPOSE_FILE)"
-	@echo "BAKE_BUILDERS_GROUP=$(BAKE_BUILDERS_GROUP)"
-	@echo "BAKE_RUNTIME_MINIMAL_GROUP=$(BAKE_RUNTIME_MINIMAL_GROUP)"
-	@echo "BAKE_RUNTIME_ALL_GROUP=$(BAKE_RUNTIME_ALL_GROUP)"
+init:
+	@./scripts/init-production.sh
 
-# ---- Bake groups ----
-base: check-rhel-host
-	@echo "==> Bake group: $(BAKE_BASE_GROUP) (OS=$(OS))"
-	@$(bake_env) $(BAKE_BASE_GROUP)
+config:
+	@$(compose) config
 
-builders-mysql: check-rhel-host
-	@echo "==> Bake group: $(BAKE_BUILDERS_MYSQL_GROUP) (OS=$(OS))"
-	@$(bake_env) $(BAKE_BUILDERS_MYSQL_GROUP)
+pull:
+	@$(compose) pull
 
-builders-pgsql: check-rhel-host
-	@echo "==> Bake group: $(BAKE_BUILDERS_PGSQL_GROUP) (OS=$(OS))"
-	@$(bake_env) $(BAKE_BUILDERS_PGSQL_GROUP)
+up: init
+	@$(compose) up -d
 
-builders-sqlite3: check-rhel-host
-	@echo "==> Bake group: $(BAKE_BUILDERS_SQLITE3_GROUP) (OS=$(OS))"
-	@$(bake_env) $(BAKE_BUILDERS_SQLITE3_GROUP)
+update: init pull
+	@$(compose) up -d --remove-orphans
 
-builders: check-rhel-host
-	@echo "==> Bake group: $(BAKE_BUILDERS_GROUP) (DB=$(DB), OS=$(OS))"
-	@$(bake_env) $(BAKE_BUILDERS_GROUP)
+stop:
+	@$(compose) stop $(ARGS)
 
-runtime-mysql-all: check-rhel-host
-	@echo "==> Bake group: $(BAKE_RUNTIME_MYSQL_ALL) (OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_MYSQL_ALL)
+down:
+	@$(compose) down $(ARGS)
 
-runtime-mysql-minimal: check-rhel-host
-	@echo "==> Bake group: $(BAKE_RUNTIME_MYSQL_MINIMAL) (OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_MYSQL_MINIMAL)
+restart:
+	@$(compose) restart $(ARGS)
 
-runtime-pgsql-all: check-rhel-host
-	@echo "==> Bake group: $(BAKE_RUNTIME_PGSQL_ALL) (OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_PGSQL_ALL)
+ps:
+	@$(compose) ps $(ARGS)
 
-runtime-pgsql-minimal: check-rhel-host
-	@echo "==> Bake group: $(BAKE_RUNTIME_PGSQL_MINIMAL) (OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_PGSQL_MINIMAL)
+logs:
+	@$(compose) logs $(ARGS) $(SERVICES)
 
-runtime-all: check-rhel-host
-	@if [ -z "$(BAKE_RUNTIME_ALL_GROUP)" ]; then \
-	  echo "ERROR: runtime-all is not defined for DB=$(DB) (no runtime groups listed for sqlite3)."; \
-	  exit 1; \
+logs-follow:
+	@$(compose) logs -f $(ARGS) $(SERVICES)
+
+backup:
+	@./scripts/backup-zabbix-db.sh
+
+restore:
+	@if [ -z "$(FILE)" ]; then \
+	  echo "ERROR: FILE=/path/to/zabbix.dump is required" >&2; \
+	  exit 2; \
 	fi
-	@echo "==> Bake group: $(BAKE_RUNTIME_ALL_GROUP) (DB=$(DB), OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_ALL_GROUP)
+	@CONFIRM_RESTORE="$${CONFIRM_RESTORE:-no}" ./scripts/restore-zabbix-db.sh "$(FILE)"
 
-runtime-minimal: check-rhel-host
-	@if [ -z "$(BAKE_RUNTIME_MINIMAL_GROUP)" ]; then \
-	  echo "ERROR: runtime-minimal is not defined for DB=$(DB) (no runtime groups listed for sqlite3)."; \
-	  exit 1; \
-	fi
-	@echo "==> Bake group: $(BAKE_RUNTIME_MINIMAL_GROUP) (DB=$(DB), OS=$(OS))"
-	@$(bake_env) $(BAKE_RUNTIME_MINIMAL_GROUP)
+psql:
+	@$(compose) exec postgres-server psql -U "$$(cat env_vars/.POSTGRES_USER)" -d zabbix
 
-# Alias
-runtime: runtime-minimal
+shell:
+	@$(compose) exec zabbix-server bash
 
-# Convenience: full build
-build: base builders runtime-minimal
-build-all: base builders runtime-all
-
-# Build a single bake target by name (not group)
-bake-target: check-rhel-host
-	@if [ -z "$(TARGET)" ]; then \
-	  echo "ERROR: TARGET is required. Example: make bake-target TARGET=server-mysql"; \
-	  exit 1; \
-	fi
-	@echo "==> Bake target: $(TARGET) (OS=$(OS), DB=$(DB), local tag=$(LOCAL_ZBX_TAG))"
-	@$(bake_env) "$(TARGET)"
-
-# ---- Compose helpers ----
-up:
-	@$(call compose_env,$(REMOTE_ZBX_TAG),$(REMOTE_IMAGE_PREFIX)) pull --ignore-pull-failures
-	@$(call compose_env,$(REMOTE_ZBX_TAG),$(REMOTE_IMAGE_PREFIX)) up -d --pull always
-
-up-local:
-	@$(MAKE) --no-print-directory build
-	@echo "==> up-local (local) tag=$(LOCAL_ZBX_TAG) prefix=$(LOCAL_IMAGE_PREFIX)"
-	@$(call compose_env,$(LOCAL_ZBX_TAG),$(LOCAL_IMAGE_PREFIX)) up -d
-
-# ---- Compose command sets ----
-COMPOSE_CMDS := pull down ps logs config restart start stop
-
-define compose_remote
-    @$(call compose_env,$(REMOTE_ZBX_TAG),$(REMOTE_IMAGE_PREFIX)) $(1)
-endef
-
-define compose_local
-    @$(call compose_env,$(LOCAL_ZBX_TAG),$(LOCAL_IMAGE_PREFIX)) $(1)
-endef
-
-.PHONY: $(COMPOSE_CMDS) l-$(COMPOSE_CMDS)
-
-$(COMPOSE_CMDS):
-	$(call compose_remote,$@ $(ARGS))
-
-l-%:
-	$(call compose_local,$* $(ARGS))
-
-# ---- Cleanup ----
 clean:
-	@echo "==> Removing local images for OS=$(OS) tag=$(LOCAL_ZBX_TAG) (best-effort)"
-	@docker image rm -f \
-	  "$(LOCAL_IMAGE_PREFIX)build-base:$(LOCAL_ZBX_TAG)" \
-	  "$(LOCAL_IMAGE_PREFIX)build-mysql:$(LOCAL_ZBX_TAG)" \
-	  "$(LOCAL_IMAGE_PREFIX)build-pgsql:$(LOCAL_ZBX_TAG)" \
-	  "$(LOCAL_IMAGE_PREFIX)build-sqlite3:$(LOCAL_ZBX_TAG)" \
-	  2>/dev/null || true
+	@$(compose) down --remove-orphans
+
+destroy:
+	@if [ "$${CONFIRM_DESTROY:-no}" != "yes" ]; then \
+	  echo "Refusing to destroy without CONFIRM_DESTROY=yes" >&2; \
+	  exit 3; \
+	fi
+	@$(compose) down -v --remove-orphans
+
+ansible-deps:
+	@ansible-galaxy install -r ansible/requirements.yml
+
+ansible-prepare:
+	@ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOK) $(ANSIBLE_ARGS)

@@ -1,0 +1,362 @@
+---
+- name: Prepare VM for the Zabbix production Compose deployment
+  hosts: zabbix_vm
+  become: true
+  gather_facts: true
+
+  vars:
+    docker_install_compose_plugin: true
+    docker_install_compose: false
+    docker_users: "{{ zabbix_docker_users | default([]) }}"
+    docker_daemon_options: "{{ zabbix_docker_daemon_options | default({}) }}"
+
+  pre_tasks:
+    - name: Assert supported OS family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+        fail_msg: >-
+          This playbook is intended for Ubuntu/Debian-like VMs. Current OS family is
+          {{ ansible_facts.os_family }}.
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install baseline packages
+      ansible.builtin.apt:
+        name:
+          - acl
+          - ca-certificates
+          - curl
+          - gnupg
+          - iptables
+          - lsb-release
+          - make
+          - openssl
+          - python3-apt
+          - rsync
+          - tzdata
+          - ufw
+        state: present
+
+    - name: Install optional VM packages
+      ansible.builtin.apt:
+        name: "{{ (['qemu-guest-agent'] if zabbix_install_qemu_guest_agent | default(true) else []) + (['unattended-upgrades'] if zabbix_install_unattended_upgrades | default(true) else []) }}"
+        state: present
+      when: zabbix_install_qemu_guest_agent | default(true) or zabbix_install_unattended_upgrades | default(true)
+
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ zabbix_timezone | default('UTC') }}"
+
+    - name: Enable qemu guest agent
+      ansible.builtin.service:
+        name: qemu-guest-agent
+        state: started
+        enabled: true
+      when: zabbix_install_qemu_guest_agent | default(true)
+
+    - name: Apply sysctl tuning
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop: "{{ zabbix_sysctl_settings | default({}) | dict2items }}"
+      when: zabbix_manage_sysctl | default(true)
+
+  roles:
+    - role: geerlingguy.docker
+
+  tasks:
+    - name: Ensure Docker service is started and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create compose project and data directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default(zabbix_compose_project_owner | default('root')) }}"
+        group: "{{ item.group | default(zabbix_compose_project_group | default('root')) }}"
+        mode: "{{ item.mode | default('0750') }}"
+      loop:
+        - path: "{{ zabbix_compose_project_path | default('/opt/zabbix') }}"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/backups"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/postgresql/data"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/usr/lib/zabbix/alertscripts"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/usr/lib/zabbix/externalscripts"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/usr/share/zabbix/modules"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/dbscripts"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/enc"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/export"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/mibs"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/modules"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/ssh_keys"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/ssl/certs"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/ssl/keys"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix/ssl/ssl_ca"
+          mode: "0750"
+        - path: "{{ zabbix_data_directory | default('/srv/zabbix') }}/etc/ssl/nginx"
+          mode: "0750"
+
+    - name: Set ownership for Zabbix writable bind mounts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "1997"
+        group: "1995"
+        recurse: true
+      loop:
+        - "{{ zabbix_data_directory | default('/srv/zabbix') }}/usr/lib/zabbix"
+        - "{{ zabbix_data_directory | default('/srv/zabbix') }}/usr/share/zabbix"
+        - "{{ zabbix_data_directory | default('/srv/zabbix') }}/var/lib/zabbix"
+
+    - name: Synchronize deployment repository from controller
+      ansible.posix.synchronize:
+        src: "{{ zabbix_compose_local_project_path }}/"
+        dest: "{{ zabbix_compose_project_path }}/"
+        delete: "{{ zabbix_compose_sync_delete | default(false) }}"
+        rsync_opts:
+          - "--exclude=.git/"
+          - "--exclude=.ansible/"
+          - "--exclude=ansible/inventory/hosts.ini"
+          - "--exclude=ansible/inventory/*.local.ini"
+          - "--exclude=env_vars/.POSTGRES_USER"
+          - "--exclude=env_vars/.POSTGRES_PASSWORD"
+          - "--exclude=backups/"
+          - "--exclude=*.dump"
+          - "--exclude=*.sql"
+          - "--exclude=*.sql.gz"
+          - "--exclude=*.tar.gz"
+      when: zabbix_compose_copy_from_controller | default(false)
+
+    - name: Ensure scripts are executable when repository is present
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0750"
+      loop:
+        - "{{ zabbix_compose_project_path }}/scripts/init-production.sh"
+        - "{{ zabbix_compose_project_path }}/scripts/backup-zabbix-db.sh"
+        - "{{ zabbix_compose_project_path }}/scripts/restore-zabbix-db.sh"
+      failed_when: false
+      when: zabbix_compose_copy_from_controller | default(false) or zabbix_compose_run_init | default(false) or zabbix_compose_up | default(false)
+
+    - name: Initialize local Zabbix secrets and runtime directories
+      ansible.builtin.command:
+        cmd: ./scripts/init-production.sh
+        chdir: "{{ zabbix_compose_project_path }}"
+      register: zabbix_init_result
+      changed_when: false
+      when: zabbix_compose_run_init | default(false) or zabbix_compose_up | default(false)
+
+    - name: Install Zabbix compose backup systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/zabbix-compose-backup.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Backup Zabbix Compose PostgreSQL database
+          Requires=docker.service
+          After=docker.service
+          ConditionPathExists={{ zabbix_compose_project_path }}/scripts/backup-zabbix-db.sh
+
+          [Service]
+          Type=oneshot
+          WorkingDirectory={{ zabbix_compose_project_path }}
+          ExecStart={{ zabbix_compose_project_path }}/scripts/backup-zabbix-db.sh
+      when: zabbix_backup_timer_enabled | default(true)
+
+    - name: Install Zabbix compose backup systemd timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/zabbix-compose-backup.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run Zabbix Compose PostgreSQL backup periodically
+
+          [Timer]
+          OnCalendar={{ zabbix_backup_on_calendar | default('*-*-* 03:15:00') }}
+          RandomizedDelaySec={{ zabbix_backup_randomized_delay | default('20min') }}
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      when: zabbix_backup_timer_enabled | default(true)
+
+    - name: Enable backup timer
+      ansible.builtin.systemd_service:
+        name: zabbix-compose-backup.timer
+        daemon_reload: true
+        state: started
+        enabled: true
+      when: zabbix_backup_timer_enabled | default(true)
+
+    - name: Install DOCKER-USER firewall helper
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/zabbix-docker-user-firewall.sh
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          IPTABLES="${IPTABLES:-iptables}"
+          CHAIN="ZABBIX-DOCKER-USER"
+          PORT="{{ zabbix_trapper_port | default(10051) }}"
+
+          # Docker creates DOCKER-USER when the daemon/network stack is active.
+          $IPTABLES -N DOCKER-USER 2>/dev/null || true
+          $IPTABLES -N "$CHAIN" 2>/dev/null || true
+          $IPTABLES -F "$CHAIN"
+
+          if ! $IPTABLES -C DOCKER-USER -j "$CHAIN" 2>/dev/null; then
+            $IPTABLES -I DOCKER-USER 1 -j "$CHAIN"
+          fi
+
+          $IPTABLES -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+          $IPTABLES -A "$CHAIN" -m conntrack --ctstate INVALID -j DROP
+
+          {% set allowed_sources = zabbix_trapper_allowed_sources | default([]) %}
+          {% if 'any' in allowed_sources %}
+          $IPTABLES -A "$CHAIN" -p tcp --dport "$PORT" -j RETURN
+          {% else %}
+          {% for source in allowed_sources %}
+          $IPTABLES -A "$CHAIN" -p tcp -s "{{ source }}" --dport "$PORT" -j RETURN
+          {% endfor %}
+          {% if zabbix_docker_user_firewall_log_drops | default(false) %}
+          $IPTABLES -A "$CHAIN" -p tcp --dport "$PORT" -m limit --limit 6/min --limit-burst 10 -j LOG --log-prefix "ZBX DOCKER DROP "
+          {% endif %}
+          $IPTABLES -A "$CHAIN" -p tcp --dport "$PORT" -j DROP
+          {% endif %}
+
+          $IPTABLES -A "$CHAIN" -j RETURN
+      when: zabbix_manage_docker_user_firewall | default(true)
+
+    - name: Install DOCKER-USER firewall systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/zabbix-docker-user-firewall.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Restrict Zabbix Docker published ports through DOCKER-USER chain
+          Requires=docker.service
+          After=docker.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/zabbix-docker-user-firewall.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      when: zabbix_manage_docker_user_firewall | default(true)
+
+    - name: Enable DOCKER-USER firewall service
+      ansible.builtin.systemd_service:
+        name: zabbix-docker-user-firewall.service
+        daemon_reload: true
+        state: started
+        enabled: true
+      when: zabbix_manage_docker_user_firewall | default(true)
+
+    - name: Configure UFW default incoming policy
+      community.general.ufw:
+        direction: incoming
+        default: deny
+      when: zabbix_manage_ufw | default(true)
+
+    - name: Configure UFW default outgoing policy
+      community.general.ufw:
+        direction: outgoing
+        default: allow
+      when: zabbix_manage_ufw | default(true)
+
+    - name: Allow SSH through UFW
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item }}"
+        to_port: "{{ zabbix_ssh_port | default(22) }}"
+        comment: Zabbix VM SSH
+      loop: "{{ zabbix_ssh_allowed_sources | default(['any']) }}"
+      when: zabbix_manage_ufw | default(true)
+
+    - name: Allow Zabbix trapper through UFW for host-level filtering
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item }}"
+        to_port: "{{ zabbix_trapper_port | default(10051) }}"
+        comment: Zabbix active agents and proxies
+      loop: "{{ zabbix_trapper_allowed_sources | default([]) }}"
+      when:
+        - zabbix_manage_ufw | default(true)
+        - zabbix_trapper_allowed_sources | default([]) | length > 0
+
+    - name: Allow reverse proxy ports through UFW when configured
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item.0 }}"
+        to_port: "{{ item.1 }}"
+        comment: Zabbix reverse proxy
+      loop: "{{ (zabbix_web_allowed_sources | default([])) | product(zabbix_web_ports | default([80, 443])) | list }}"
+      when:
+        - zabbix_manage_ufw | default(true)
+        - zabbix_web_allowed_sources | default([]) | length > 0
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+        logging: "{{ zabbix_ufw_logging | default('low') }}"
+      when: zabbix_manage_ufw | default(true)
+
+    - name: Start compose stack when requested
+      community.docker.docker_compose_v2:
+        project_src: "{{ zabbix_compose_project_path }}"
+        files:
+          - compose.yaml
+        env_files:
+          - .env
+        pull: "{{ zabbix_compose_pull | default('missing') }}"
+        state: present
+        wait: "{{ zabbix_compose_wait | default(true) }}"
+        wait_timeout: "{{ zabbix_compose_wait_timeout | default(180) }}"
+      when: zabbix_compose_up | default(false)
+
+    - name: Show next steps
+      ansible.builtin.debug:
+        msg:
+          - "VM is ready for the Zabbix Compose deployment."
+          - "Project path: {{ zabbix_compose_project_path }}"
+          - "Data path: {{ zabbix_data_directory }}"
+          - "Run 'make init && make config && make up' in the project path, unless zabbix_compose_up=true was used."

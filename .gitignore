@@ -1,10 +1,48 @@
-**.DS_Store
+# Runtime data
 zbx_env/
 zbx_env*/
+/srv/
+backups/
+*.dump
+*.sql
+*.sql.gz
+*.tar.gz
+
+# Local Compose/env overrides
+.env.local
+env_vars/*_override
+env_vars/.POSTGRES_USER
+env_vars/.POSTGRES_PASSWORD
+env_vars/.MYSQL_*
+
+# TLS and DB certificates/secrets
 .*CERT_FILE
 .*KEY_FILE
 .*CA_FILE
-Dockerfiles/*/rhel/secrets/*
-sources/*
-.*.orig
-.*.rej
+*.pem
+*.key
+*.crt
+
+# Editor / patch leftovers
+**.DS_Store
+*.orig
+*.rej
+
+# Local Ansible inventory/secrets
+ansible/inventory/hosts.ini
+ansible/inventory/*.local.ini
+ansible/inventory/group_vars/*.vault.yml
+
+# Production deployment secrets and runtime artifacts
+env_vars/.POSTGRES_USER
+env_vars/.POSTGRES_PASSWORD
+env_vars/.MYSQL_USER
+env_vars/.MYSQL_PASSWORD
+env_vars/.MYSQL_ROOT_USER
+env_vars/.MYSQL_ROOT_PASSWORD
+env_vars/*_override
+.env.local
+backups/
+*.dump
+*.sql.gz
+*.tar.gz

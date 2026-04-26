@@ -1,99 +1,130 @@
-![Zabbix Logo](https://assets.zabbix.com/img/logo/zabbix_logo_500x131.png)
+# Zabbix production deployment
+
+This repository is a deployment-only Compose profile for a single Zabbix VM, for example a VM running in Proxmox.
+
+Target stack:
+
+- Zabbix Server 7.0 LTS, PostgreSQL build
+- Zabbix Web Nginx 7.0 LTS, PostgreSQL build
+- PostgreSQL 17 with TimescaleDB 2.18
+- local persistent data under `/srv/zabbix`
+- local PostgreSQL credentials stored as Docker secrets through files in `env_vars/`
 
 
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/zabbix/zabbix-docker/badge)](https://securityscorecards.dev/viewer/?uri=github.com/zabbix/zabbix-docker)
-<a href="https://bestpractices.coreinfrastructure.org/projects/8395" style="display: inline;"><img src="https://bestpractices.coreinfrastructure.org/projects/8395/badge" style="display: inline;"></a>
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=zabbix-docker&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=zabbix-docker)
+> [!IMPORTANT]
+> Для production-развёртывания в Proxmox VM используй минимальный профиль из [README.production.md](README.production.md).
+> Дефолтный `compose.yaml` в этом форке настроен на Zabbix LTS + PostgreSQL/TimescaleDB + Nginx.
 
-[![Build images (DockerHub)](https://github.com/zabbix/zabbix-docker/actions/workflows/images_build.yml/badge.svg?branch=7.4&event=push)](https://github.com/zabbix/zabbix-docker/actions/workflows/images_build.yml)
-[![Build images (DockerHub, Windows)](https://github.com/zabbix/zabbix-docker/actions/workflows/images_build_windows.yml/badge.svg?branch=7.4&event=push)](https://github.com/zabbix/zabbix-docker/actions/workflows/images_build_windows.yml)
+The repository intentionally does **not** contain Dockerfiles, GitHub Actions, image build/bake configuration, Kubernetes manifests, proxy profiles, Selenium, Java Gateway, SNMP traps, Elasticsearch, MySQL, or containerized Zabbix Agent. Use `zabbix-agent2` as a host package when you need to monitor the VM itself.
 
-# What is Zabbix?
+## First run
 
-Zabbix is an enterprise-class open source distributed monitoring solution.
-
-Zabbix is software that monitors numerous parameters of a network and the health and integrity of servers. Zabbix uses a flexible notification mechanism that allows users to configure e-mail based alerts for virtually any event. This allows a fast reaction to server problems. Zabbix offers excellent reporting and data visualisation features based on the stored data. This makes Zabbix ideal for capacity planning.
-
-For more information and related downloads for Zabbix components, please visit https://hub.docker.com/u/zabbix/ and https://zabbix.com
-
-
-## Zabbix Dockerfiles
-
-This repository contains **Dockerfile** of [Zabbix](https://zabbix.com/) for [Docker](https://www.docker.com/)'s [automated build](https://registry.hub.docker.com/u/zabbix/) published to the public [Docker Hub Registry](https://registry.hub.docker.com/).
-
-### Base Docker Image
-
-* [alpine](https://hub.docker.com/_/alpine/)
-* [centos](https://quay.io/repository/centos/centos?tab=info)
-* [oracle linux](https://hub.docker.com/_/oraclelinux/)
-* [ubuntu](https://hub.docker.com/_/ubuntu/)
-
-### Usage
-
-There is some documentation and examples in the [official Zabbix Documentation](https://www.zabbix.com/documentation/current/manual/installation/containers)!
-
-Please also follow usage instructions of each Zabbix component image:
-
-* [zabbix-agent](https://hub.docker.com/r/zabbix/zabbix-agent/) - Zabbix agent
-* [zabbix-agent2](https://hub.docker.com/r/zabbix/zabbix-agent2/) - Zabbix agent 2
-* [zabbix-server-mysql](https://hub.docker.com/r/zabbix/zabbix-server-mysql/) - Zabbix server with MySQL database support
-* [zabbix-server-pgsql](https://hub.docker.com/r/zabbix/zabbix-server-pgsql/) - Zabbix server with PostgreSQL database support
-* [zabbix-web-apache-mysql](https://hub.docker.com/r/zabbix/zabbix-web-apache-mysql/) - Zabbix web interface on Apache2 web server with MySQL database support
-* [zabbix-web-apache-pgsql](https://hub.docker.com/r/zabbix/zabbix-web-apache-pgsql/) - Zabbix web interface on Apache2 web server with PostgreSQL database support
-* [zabbix-web-nginx-mysql](https://hub.docker.com/r/zabbix/zabbix-web-nginx-mysql/) - Zabbix web interface on Nginx web server with MySQL database support
-* [zabbix-web-nginx-pgsql](https://hub.docker.com/r/zabbix/zabbix-web-nginx-pgsql/) - Zabbix web interface on Nginx web server with PostgreSQL database support
-* [zabbix-proxy-sqlite3](https://hub.docker.com/r/zabbix/zabbix-proxy-sqlite3/) - Zabbix proxy with SQLite3 database support
-* [zabbix-proxy-mysql](https://hub.docker.com/r/zabbix/zabbix-proxy-mysql/) - Zabbix proxy with MySQL database support
-* [zabbix-java-gateway](https://hub.docker.com/r/zabbix/zabbix-java-gateway/) - Zabbix Java Gateway
-* [zabbix-web-service](https://hub.docker.com/r/zabbix/zabbix-web-service/) - Zabbix web service for performing various tasks using headless web browser (for example, reporting)
-* [zabbix-snmptraps](https://hub.docker.com/r/zabbix/zabbix-snmptraps/) - Additional container image for Zabbix server and Zabbix proxy to support SNMP traps
-
-### Docker Compose
-
-> [!NOTE]
-> The following requires `make` and `docker compose` version 2.24.0 or greater.
-
-You can use the Docker Compose files for MySQL and PostgreSQL (**compose.yaml** and **compose_pgsql.yaml**, respectively) directly with the ``docker compose`` command. The required images and the Compose file behavior can be configured through environment variables and the .env file. By default, Alpine-based images and the latest version from the current branch are used.
-
-In addition, a Makefile is provided to configure and run the required Docker Compose files, supporting a variety of base operating system and database engine combinations, as well as to build Zabbix components locally.
-
-To get started clone this repository and then from the root directory of the repository run:
-```
-make help
-```
-To start with the default configuration run:
-```
+```bash
+sudo make init
+make config
+make pull
 make up
-```
-Use variables to customize the configuration to suit your needs.  For example, the following selects Postgres as the underlying database, alpine as the base OS, and exposes the web interface on ports 8282 and 8443:
-```
-make up DB=pgsql OS=alpine ZABBIX_WEB_NGINX_HTTP_PORT=8282 ZABBIX_WEB_NGINX_HTTPS_PORT=8443
-```
-Then to clean up run:
-```
-make down DB=pgsql
+make ps
 ```
 
-Provided compose files support several [Compose  profiles](https://docs.docker.com/compose/profiles/). Minimal set of services is brought up by default, to start additional components e.g. Zabbix Agent use profile 'full' or 'all'. Additionally, it is possible to start only required components.
+The web UI is bound to loopback by default:
 
-## Issues and Wiki
+```text
+http://127.0.0.1:8080
+https://127.0.0.1:8443
+```
 
-Be sure to check [the Wiki-page](https://github.com/zabbix/zabbix-docker/wiki) on common problems and questions. If you still have problems with or questions about the images, please contact us through a [GitHub issue](https://github.com/zabbix/zabbix-docker/issues).
+Put a reverse proxy or VPN in front of it. Port `10051/tcp` is published on `0.0.0.0` for active agents and proxies; restrict it with the host firewall to trusted networks.
 
-> [!NOTE]
-> Please report here issues and feature requests related to Docker images only. If you have issues or ideas how to improve Zabbix, use official [bug tracker](https://support.zabbix.com/).
+## Secrets
 
-## Contributing
+Real secret files are ignored by Git:
 
-You are invited to contribute new features, fixes, or updates, large or small; we are always thrilled to receive pull requests, and do our best to process them as fast as we can.
+```text
+env_vars/.POSTGRES_USER
+env_vars/.POSTGRES_PASSWORD
+```
 
-Before you start to code, we recommend discussing your plans through a [GitHub issue](https://github.com/zabbix/zabbix-docker/issues), especially for more ambitious contributions. This gives other contributors a chance to point you in the right direction, give you feedback on your design, and help you find out if someone else is working on the same thing.
+`make init` creates them if missing. Example files are kept only as placeholders:
 
-## License
+```text
+env_vars/.POSTGRES_USER.example
+env_vars/.POSTGRES_PASSWORD.example
+```
 
-Starting from Zabbix version 7.0, all subsequent Zabbix versions will be released under the GNU Affero General Public License version 3 (AGPLv3).
-You can modify the relevant version and propagate such modified version under the terms of the AGPLv3 as published by the Free Software Foundation.
-For additional details, including answers to common questions about the AGPLv3, see the generic FAQ from the [Free Software Foundation](http://www.fsf.org/licenses/gpl-faq.html).
+## Data layout
 
-Zabbix is Open Source Software, however, if you use Zabbix in a commercial context we kindly ask you to support the development of Zabbix by purchasing some level of technical support.
-All previous Zabbix software versions up to 6.4 are released under the GNU General Public License version 2 (GPLv2). The formal terms of the GPLv2 and AGPLv3 can be found at http://www.fsf.org/licenses/.
+`DATA_DIRECTORY=/srv/zabbix` is set in `.env`. In Proxmox, prefer a dedicated virtual disk mounted to `/srv/zabbix`.
+
+Important paths:
+
+```text
+/srv/zabbix/var/lib/postgresql/data   PostgreSQL data
+/srv/zabbix/backups                   pg_dump/config backups
+/srv/zabbix/usr/lib/zabbix/*          alert and external scripts
+/srv/zabbix/var/lib/zabbix/*          Zabbix runtime mounts
+```
+
+## Operations
+
+```bash
+make logs-follow
+make restart
+make update
+make backup
+```
+
+Restore is intentionally guarded:
+
+```bash
+CONFIRM_RESTORE=yes make restore FILE=/srv/zabbix/backups/zabbix-YYYYMMDD-HHMMSS.dump
+```
+
+Destructive volume removal is also guarded:
+
+```bash
+CONFIRM_DESTROY=yes make destroy
+```
+
+## Optional overrides
+
+Create ignored override files when you need local changes without changing tracked defaults:
+
+```text
+env_vars/.env_srv_override
+env_vars/.env_web_override
+env_vars/.env_db_pgsql_override
+```
+Typical examples are cache sizes, poller counts, reverse-proxy headers, and PostgreSQL-specific settings.
+
+
+## VM preparation with Ansible
+
+The `ansible/` directory contains a VM preparation playbook for this Compose profile.
+It uses existing Galaxy content instead of custom roles:
+
+- `geerlingguy.docker` installs Docker Engine and the Docker Compose plugin.
+- `community.general.ufw` manages UFW rules.
+- `community.docker.docker_compose_v2` can optionally start the stack.
+
+Install Ansible dependencies and run the preparation playbook:
+
+```bash
+make ansible-deps
+cp ansible/inventory/hosts.example.ini ansible/inventory/hosts.ini
+vim ansible/inventory/hosts.ini
+vim ansible/inventory/group_vars/zabbix_vm.yml
+make ansible-prepare ANSIBLE_INVENTORY=ansible/inventory/hosts.ini
+```
+
+By default the playbook prepares the VM only: packages, Docker, qemu guest agent, UFW, `/srv/zabbix`,
+backup timer, and Docker `DOCKER-USER` filtering for `10051/tcp`. Set these variables when you want the
+playbook to copy the repository and start Compose too:
+
+```yaml
+zabbix_compose_copy_from_controller: true
+zabbix_compose_run_init: true
+zabbix_compose_up: true
+```
+
+Keep `zabbix_trapper_allowed_sources` limited to trusted active-agent/proxy networks. Docker-published ports can bypass plain UFW filtering, so the playbook installs an additional `DOCKER-USER` chain service by default.

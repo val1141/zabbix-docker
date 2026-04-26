@@ -1,194 +1,215 @@
+name: zabbix
+
 services:
- server-db-init:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: server-mysql-db-init
-  image: "${ZABBIX_SERVER_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
+  postgres-server:
+    image: "${POSTGRESQL_IMAGE}:${POSTGRESQL_IMAGE_TAG}"
+    restart: "${RESTART_POLICY}"
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_connections=200
+    env_file:
+      - path: ${ENV_VARS_DIRECTORY}/.env_db_pgsql
+        required: true
+      - path: ${ENV_VARS_DIRECTORY}/.env_db_pgsql_override
+        required: false
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    volumes:
+      - ${DATA_DIRECTORY}/var/lib/postgresql/data:/var/lib/postgresql/data:rw
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$(cat /run/secrets/POSTGRES_USER)" -d "$${POSTGRES_DB}" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 1m
+    networks:
+      database:
+        aliases:
+          - postgres-server
 
- proxy-db-init:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: proxy-mysql-db-init
-  image: "${ZABBIX_PROXY_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
+  server-db-init:
+    image: "${ZABBIX_SERVER_PGSQL_IMAGE}:${ZBX_IMAGE_TAG}"
+    init: true
+    attach: true
+    read_only: true
+    restart: "no"
+    command: init_db_only
+    env_file:
+      - path: ${ENV_VARS_DIRECTORY}/.env_db_pgsql
+        required: true
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    volumes:
+      - ${DATA_DIRECTORY}/var/lib/zabbix/dbscripts:/var/lib/zabbix/dbscripts:ro
+    tmpfs:
+      - /tmp
+    depends_on:
+      postgres-server:
+        condition: service_healthy
+    networks:
+      database:
+        aliases:
+          - zabbix-server-pgsql-init
+    labels:
+      com.zabbix.component: "server-db-init"
+      com.zabbix.dbtype: "pgsql"
 
- zabbix-server:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: server-mysql
-  image: "${ZABBIX_SERVER_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   server-db-init:
-    condition: service_completed_successfully
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
+  zabbix-server:
+    image: "${ZABBIX_SERVER_PGSQL_IMAGE}:${ZBX_IMAGE_TAG}"
+    init: true
+    restart: "${RESTART_POLICY}"
+    attach: true
+    ports:
+      - name: zabbix-trapper
+        target: 10051
+        host_ip: "${ZABBIX_SERVER_BIND_IP}"
+        published: "${ZABBIX_SERVER_PORT}"
+        protocol: tcp
+        app_protocol: zabbix-trapper
+    env_file:
+      - path: ${ENV_VARS_DIRECTORY}/.env_srv
+        required: true
+      - path: ${ENV_VARS_DIRECTORY}/.env_srv_override
+        required: false
+      - path: ${ENV_VARS_DIRECTORY}/.env_db_pgsql
+        required: true
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DATA_DIRECTORY}/usr/lib/zabbix/alertscripts:/usr/lib/zabbix/alertscripts:ro
+      - ${DATA_DIRECTORY}/usr/lib/zabbix/externalscripts:/usr/lib/zabbix/externalscripts:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/export:/var/lib/zabbix/export:rw
+      - ${DATA_DIRECTORY}/var/lib/zabbix/modules:/var/lib/zabbix/modules:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/enc:/var/lib/zabbix/enc:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/ssh_keys:/var/lib/zabbix/ssh_keys:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/mibs:/var/lib/zabbix/mibs:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/ssl/certs:/var/lib/zabbix/ssl/certs:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/ssl/keys:/var/lib/zabbix/ssl/keys:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/ssl/ssl_ca:/var/lib/zabbix/ssl/ssl_ca:rw
+    tmpfs:
+      - /tmp
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 20000
+        hard: 40000
+    depends_on:
+      server-db-init:
+        condition: service_completed_successfully
+      postgres-server:
+        condition: service_healthy
+    networks:
+      database:
+      backend:
+        aliases:
+          - zabbix-server
+      frontend:
+    stop_grace_period: 30s
+    sysctls:
+      - net.ipv4.ip_local_port_range=1024 64999
+      - net.ipv4.conf.all.accept_redirects=0
+      - net.ipv4.conf.all.secure_redirects=0
+      - net.ipv4.conf.all.send_redirects=0
+    labels:
+      com.zabbix.component: "server"
+      com.zabbix.dbtype: "pgsql"
 
- zabbix-proxy-sqlite3:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: proxy-sqlite3
-  image: "${ZABBIX_PROXY_SQLITE3_IMAGE}:${ZBX_IMAGE_TAG}"
-  labels:
-   com.zabbix.os: "${OS}"
+  zabbix-web-nginx-pgsql:
+    image: "${ZABBIX_WEB_NGINX_PGSQL_IMAGE}:${ZBX_IMAGE_TAG}"
+    restart: "${RESTART_POLICY}"
+    attach: false
+    ports:
+      - name: web-http
+        target: 8080
+        host_ip: "${ZABBIX_WEB_NGINX_BIND_IP}"
+        published: "${ZABBIX_WEB_NGINX_HTTP_PORT}"
+        protocol: tcp
+        app_protocol: http
+      - name: web-https
+        target: 8443
+        host_ip: "${ZABBIX_WEB_NGINX_BIND_IP}"
+        published: "${ZABBIX_WEB_NGINX_HTTPS_PORT}"
+        protocol: tcp
+        app_protocol: https
+    env_file:
+      - path: ${ENV_VARS_DIRECTORY}/.env_web
+        required: true
+      - path: ${ENV_VARS_DIRECTORY}/.env_web_override
+        required: false
+      - path: ${ENV_VARS_DIRECTORY}/.env_db_pgsql
+        required: true
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DATA_DIRECTORY}/etc/ssl/nginx:/etc/ssl/nginx:ro
+      - ${DATA_DIRECTORY}/usr/share/zabbix/modules:/usr/share/zabbix/modules:ro
+      - ${DATA_DIRECTORY}/var/lib/zabbix/enc:/var/lib/zabbix/enc:ro
+    tmpfs:
+      - /tmp
+      - /var/lib/php/session:mode=770,uid=1997,gid=1995
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
+      interval: 1m30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+      start_interval: 5s
+    depends_on:
+      server-db-init:
+        condition: service_completed_successfully
+      postgres-server:
+        condition: service_healthy
+      zabbix-server:
+        condition: service_started
+    networks:
+      database:
+      backend:
+        aliases:
+          - zabbix-web-nginx-pgsql
+      frontend:
+    stop_grace_period: 10s
+    sysctls:
+      - net.core.somaxconn=65535
+    labels:
+      com.zabbix.component: "frontend"
+      com.zabbix.webserver: "nginx"
+      com.zabbix.dbtype: "pgsql"
 
- zabbix-proxy-mysql:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: proxy-mysql
-  image: "${ZABBIX_PROXY_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   proxy-db-init:
-    condition: service_completed_successfully
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-web-apache-mysql:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: web-apache-mysql
-  image: "${ZABBIX_WEB_APACHE_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   server-db-init:
-    condition: service_completed_successfully
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-web-nginx-mysql:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: web-nginx-mysql
-  image: "${ZABBIX_WEB_NGINX_MYSQL_IMAGE}:${ZBX_IMAGE_TAG}"
-  depends_on:
-   server-db-init:
-    condition: service_completed_successfully
-   mysql-server:
-    condition: service_healthy
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-agent:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: agent
-  image: "${ZABBIX_AGENT_IMAGE}:${ZBX_IMAGE_TAG}"
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-java-gateway:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: java-gateway
-  image: "${ZABBIX_JAVA_GATEWAY_IMAGE}:${ZBX_IMAGE_TAG}"
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-snmptraps:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: snmptraps
-  image: "${ZABBIX_SNMPTRAPS_IMAGE}:${ZBX_IMAGE_TAG}"
-  labels:
-   com.zabbix.os: "${OS}"
-
- zabbix-web-service:
-  extends:
-   file: compose_zabbix_components.yaml
-   service: web-service
-  image: "${ZABBIX_WEB_SERVICE_IMAGE}:${ZBX_IMAGE_TAG}"
-  labels:
-   com.zabbix.os: "${OS}"
-
- mysql-server:
-  extends:
-   file: compose_databases.yaml
-   service: mysql-server
-
- elasticsearch:
-  extends:
-   file: compose_databases.yaml
-   service: elasticsearch
-
- selenium:
-  extends:
-   file: compose_additional_components.yaml
-   service: selenium
-
- selenium-chrome:
-  platform: linux/amd64
-  extends:
-   file: compose_additional_components.yaml
-   service: selenium-chrome
-
- selenium-firefox:
-  extends:
-   file: compose_additional_components.yaml
-   service: selenium-firefox
+secrets:
+  POSTGRES_USER:
+    file: ${ENV_VARS_DIRECTORY}/.POSTGRES_USER
+  POSTGRES_PASSWORD:
+    file: ${ENV_VARS_DIRECTORY}/.POSTGRES_PASSWORD
 
 networks:
   frontend:
-    driver: bridge
-    enable_ipv6: "${FRONTEND_ENABLE_IPV6}"
+    name: zabbix_frontend
+    enable_ipv6: ${FRONTEND_ENABLE_IPV6}
     ipam:
-      driver: "${FRONTEND_NETWORK_DRIVER}"
       config:
-      - subnet: "${FRONTEND_SUBNET}"
+        - subnet: ${FRONTEND_SUBNET}
+
   backend:
-    driver: bridge
-    enable_ipv6: "${BACKEND_ENABLE_IPV6}"
-    internal: true
+    name: zabbix_backend
+    enable_ipv6: ${BACKEND_ENABLE_IPV6}
     ipam:
-      driver: "${BACKEND_NETWORK_DRIVER}"
       config:
-      - subnet: "${BACKEND_SUBNET}"
+        - subnet: ${BACKEND_SUBNET}
+
   database:
-    driver: bridge
-    enable_ipv6: "${DATABASE_NETWORK_ENABLE_IPV6}"
-    internal: true
-    ipam:
-      driver: "${DATABASE_NETWORK_DRIVER}"
-  tools_frontend:
-    driver: bridge
-    enable_ipv6: "${ADD_TOOLS_ENABLE_IPV6}"
-    ipam:
-      driver: "${ADD_TOOLS_NETWORK_DRIVER}"
-      config:
-      - subnet: "${ADD_TOOLS_SUBNET}"
-
-volumes:
-  snmptraps:
-#  mysql_socket:
-
-secrets:
-  MYSQL_USER:
-    file: ${ENV_VARS_DIRECTORY}/.MYSQL_USER
-  MYSQL_PASSWORD:
-    file: ${ENV_VARS_DIRECTORY}/.MYSQL_PASSWORD
-  MYSQL_ROOT_USER:
-    file: ${ENV_VARS_DIRECTORY}/.MYSQL_ROOT_USER
-  MYSQL_ROOT_PASSWORD:
-    file: ${ENV_VARS_DIRECTORY}/.MYSQL_ROOT_PASSWORD
-#  client-key.pem:
-#    file: ${ENV_VARS_DIRECTORY}/.ZBX_DB_KEY_FILE
-#  client-cert.pem:
-#    file: ${ENV_VARS_DIRECTORY}/.ZBX_DB_CERT_FILE
-#  root-ca.pem:
-#    file: ${ENV_VARS_DIRECTORY}/.ZBX_DB_CA_FILE
-#  server-cert.pem:
-#    file: ${ENV_VARS_DIRECTORY}/.DB_CERT_FILE
-#  server-key.pem:
-#    file: ${ENV_VARS_DIRECTORY}/.DB_KEY_FILE
+    name: zabbix_database
+    enable_ipv6: ${DATABASE_NETWORK_ENABLE_IPV6}

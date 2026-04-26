@@ -1,2 +1,0 @@
-markdown==3.10.2
-requests==2.33.0
